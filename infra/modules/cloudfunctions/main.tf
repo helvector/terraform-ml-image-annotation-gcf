@@ -72,6 +72,25 @@ resource "google_project_iam_member" "gcf_sa_roles" {
   project = data.google_project.project.id
 }
 
+# Dedicated SA for Cloud Build. Orgs with the 2024 Cloud Build defaults have no
+# default build SA, so Cloud Functions gen2 must be told which SA builds the code.
+# https://cloud.google.com/build/docs/cloud-build-service-account-updates
+resource "google_service_account" "gcf_build_sa" {
+  account_id   = "gcf-build-sa"
+  display_name = "Service Account - for building cloud function source."
+}
+
+resource "google_project_iam_member" "gcf_build_sa_roles" {
+  for_each = toset([
+    "roles/logging.logWriter",       # build logs
+    "roles/artifactregistry.writer", # push function images
+    "roles/storage.objectViewer",    # read source archive
+  ])
+  role    = each.key
+  member  = "serviceAccount:${google_service_account.gcf_build_sa.email}"
+  project = data.google_project.project.id
+}
+
 # -------- Vision annotation GCF accessible from the internet or internally only --------------
 
 
@@ -83,10 +102,12 @@ resource "google_cloudfunctions2_function" "annotate_http" {
   depends_on = [
     google_storage_bucket_object.gcf_code,
     google_project_iam_member.gcf_sa_roles,
+    google_project_iam_member.gcf_build_sa_roles,
   ]
   build_config {
-    runtime     = "python311"
-    entry_point = "annotate_http"
+    runtime         = "python311"
+    entry_point     = "annotate_http"
+    service_account = google_service_account.gcf_build_sa.id
     source {
       storage_source {
         bucket = google_storage_bucket.code_bucket.name
@@ -146,6 +167,7 @@ resource "google_cloudfunctions2_function" "annotate_gcs" {
   depends_on = [
     google_storage_bucket_object.gcf_code,
     google_project_iam_member.gcf_sa_roles,
+    google_project_iam_member.gcf_build_sa_roles,
     data.google_storage_project_service_account.gcs_account
   ]
   name        = "annotate_gcs"
@@ -154,8 +176,9 @@ resource "google_cloudfunctions2_function" "annotate_gcs" {
   description = "Vision API Image Annotate with GCS"
 
   build_config {
-    runtime     = "python310"    # google-cloud-storage is not available for 3.11
-    entry_point = "annotate_gcs" # Set the entry point in the code
+    runtime         = "python310"    # google-cloud-storage is not available for 3.11
+    entry_point     = "annotate_gcs" # Set the entry point in the code
+    service_account = google_service_account.gcf_build_sa.id
     environment_variables = {
       BUILD_CONFIG_TEST = "build_test"
     }
